@@ -112,7 +112,8 @@ if __name__ == "__main__":
         "cxr-small": "cxr-other-small",
         "cifar10": "cifar100",
         "cmnist": "cmnist-other",
-        "celeba": "celeba-other"
+        "celeba": "celeba-other",
+        "jet_features": "jet_features-other"
     }
     args_list.append("--out_dataset")
     args_list.append(out_dataset[args.in_dataset])

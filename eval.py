@@ -26,6 +26,7 @@ import wandb
 from scipy import misc
 from utils import metric
 from models.resnet import get_model
+from models.mlp import get_model_mlp
 from utils.eval_utils import get_dataloaders, train_mahalanobis, process_mahalanobis
 import logging
 
@@ -199,7 +200,10 @@ def eval_mahalanobis():
 
     trainloaderIn, testloaderIn, testloaderOut = get_dataloaders(args)
 
-    model = get_model(args)
+    if args.model_arch == "mlp":
+        model = get_model_mlp(args)
+    else:
+        model = get_model(args)
 
     model.eval()
 
@@ -244,7 +248,10 @@ def eval_logits():
 
     _, testloaderIn, testloaderOut = get_dataloaders(args)
 
-    model = get_model(args)
+    if args.model_arch == "mlp":
+        model = get_model_mlp(args)
+    else:
+        model = get_model(args)
     model.eval()
 
     t0 = time.time()
@@ -311,7 +318,10 @@ def eval_msp_and_odin():
 
     _, testloaderIn, testloaderOut = get_dataloaders(args)
 
-    model = get_model(args)
+    if args.model_arch == "mlp":
+        model = get_model_mlp(args)
+    else:
+        model = get_model(args)
     model.eval()
 
     t0 = time.time()
@@ -450,7 +460,10 @@ def eval_energy():
     log.addHandler(streamHandler) 
 
     # create model
-    model = get_model(args)
+    if args.model_arch == "mlp":
+        model = get_model_mlp(args)
+    else:
+        model = get_model(args)
     model = model.to(device)
 
     _, testloaderIn, testloaderOut = get_dataloaders(args)

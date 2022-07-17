@@ -16,6 +16,7 @@ from utils import AverageMeter
 from dataset.cmnist_dataset import get_cmnist_dataloader, get_fmnist_dataloader
 from dataset.cifar_dataset import get_cifar100_dataloader, get_svhn_dataloader, get_lsun_dataloader
 from dataset.celeba_dataset import get_celeba_ood_dataloader
+from dataset.jet_dataset import JetFeaturesDataset, get_jet_features_dataloader
 
 
 def get_dataloaders(args, exact=False):
@@ -26,6 +27,8 @@ def get_dataloaders(args, exact=False):
         dataset_class = ColoredMNIST
     elif args.in_dataset == "celeba":
         dataset_class = celebADataset
+    elif args.in_dataset == "jet_features":
+        dataset_class = JetFeaturesDataset
     else:
         raise ValueError(f"in_dataset not supported: {args.in_dataset}.")
     
@@ -65,6 +68,8 @@ def get_dataloaders(args, exact=False):
         testloaderOut = get_fmnist_dataloader(args, args.data_label_correlation, split="test", root_dir="/scratch/lhz209/nood/data")
     elif args.out_dataset == "celeba-other":
         testloaderOut = get_celeba_ood_dataloader(args)
+    elif args.out_dataset == "jet_features-other":
+        testloaderOut = get_jet_features_dataloader(args, args.data_label_correlation, split="ood")
     else:
         raise NotImplemented(f"{args.out_dataset}")
 

@@ -17,10 +17,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score
 from models.resnet import load_model, CriticModelExact, get_model
+from models.mlp import MLP, MLPCritic, get_model_mlp
 from utils import AverageMeter, save_checkpoint, accuracy
 from dataset.cub_dataset import WaterbirdDataset
 from dataset.celeba_dataset import celebADataset
+from dataset.jet_dataset import JetFeaturesDataset
 import math
+
 
 parser = argparse.ArgumentParser(description=' use resnet (pretrained)')
 
@@ -238,7 +241,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, epoch, log, rew
 
         if joint_indep_args["joint_indep"]:
             _, _, info_losses = compute_critic_loss(inputs, targets, nuisances, model, joint_indep_args["critic_model"],
-                                                    criterion, reweight_args, joint_indep_args, split="train")
+                                                    joint_indep_args["critic_criterion"], reweight_args, joint_indep_args, split="train")
             losses = losses - joint_indep_args["lambda"] * info_losses
 
         if reweight_args["reweight"]:
@@ -311,7 +314,7 @@ def adjust_learning_rate(args, optimizer, epoch):
         param_group['lr'] = lr
 
 
-def compute_critic_loss(inputs, labels, nuisances, model, critic_model, criterion, reweight_args, joint_indep_args, split="train"):
+def compute_critic_loss(inputs, labels, nuisances, model, critic_model, critic_criterion, reweight_args, joint_indep_args, split="train"):
     """ Instead of predicting whether z comes from actual or a different image, predict z directly. """
     activations, _ = model(inputs)
 
@@ -319,7 +322,7 @@ def compute_critic_loss(inputs, labels, nuisances, model, critic_model, criterio
         outputs = critic_model(activations, torch.zeros_like(labels.unsqueeze(1)).type(torch.FloatTensor).to(device))
     else:
         outputs = critic_model(activations, labels.unsqueeze(1).type(torch.FloatTensor).to(device))
-    losses = criterion(outputs, nuisances)
+    losses = critic_criterion(outputs, nuisances)
     nuisance_marginals = torch.tensor([joint_indep_args["nuisance_prior"][z.item()] for z in nuisances]).to(device)
     losses = torch.div(losses, nuisance_marginals)
     targets = nuisances
@@ -346,7 +349,7 @@ def train_critic(critic_model, model, train_loader, criterion, optimizer, epoch,
         labels = labels.long().to(device)
         nuisances = nuisances.to(device)
         outputs, targets, losses = compute_critic_loss(
-            inputs, labels, nuisances, model, critic_model, criterion, reweight_args, joint_indep_args, split="train")
+            inputs, labels, nuisances, model, critic_model, joint_indep_args["critic_criterion"], reweight_args, joint_indep_args, split="train")
         
         # unweighted metrics
         # measure accuracy and record loss
@@ -394,7 +397,7 @@ def validate_critic(val_loader, critic_model, model, criterion, epoch, log, rewe
             labels = labels.long().to(device)
             nuisances = nuisances.to(device)
             outputs, targets, losses = compute_critic_loss(
-                inputs, labels, nuisances, model, critic_model, criterion, reweight_args, joint_indep_args, split="val")
+                inputs, labels, nuisances, model, critic_model, joint_indep_args["critic_criterion"], reweight_args, joint_indep_args, split="val")
             
             # unweighted metrics
             # measure accuracy and record loss
@@ -434,6 +437,8 @@ def main():
         dataset_class = WaterbirdDataset
     elif args.in_dataset == "celeba":
         dataset_class = celebADataset
+    elif args.in_dataset == "jet_features":
+        dataset_class = JetFeaturesDataset
     else:
         raise ValueError(f"in_dataset not supported: {args.in_dataset}.")
     
@@ -452,13 +457,18 @@ def main():
     
     balanced_test_loader = DataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=False, **kwargs)
 
-    # get model
-    img_side_dict = {"waterbird": 224, "cxr": 224, "cifar10": 32, "celeba": 224}
-    img_side = img_side_dict[args.in_dataset]
-    num_classes_dict = {"waterbird": 2, "cxr": 2, "cifar10": 10, "celeba": 2}
-    num_classes = num_classes_dict[args.in_dataset]
+
     
-    base_model = load_model(orig=img_side==224, num_classes=num_classes)
+    if args.model_arch == "resnet18":
+        # get model
+        img_side_dict = {"waterbird": 224, "cxr": 224, "cifar10": 32, "celeba": 224}
+        img_side = img_side_dict[args.in_dataset]
+        num_classes_dict = {"waterbird": 2, "cxr": 2, "cifar10": 10, "celeba": 2}
+        num_classes = num_classes_dict[args.in_dataset]
+        base_model = load_model(orig=img_side==224, num_classes=num_classes)
+    elif args.model_arch == "mlp":
+        base_model = MLP(n_feats=12, num_classes=2)
+
     base_model_file = os.path.join(directory, "checkpoint_main.pth.tar")
     if os.path.exists(base_model_file):
         saved_model = torch.load(base_model_file, map_location=torch.device(device))
@@ -478,7 +488,10 @@ def main():
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
     
     if args.joint_indep:
-        critic_model = CriticModelExact(img_side=img_side, num_classes=num_classes, model_arch=args.model_arch).to(device)
+        if args.model_arch == "mlp":
+            critic_model = MLPCritic(n_feats=12, num_classes=num_classes).to(device)
+        else:
+            critic_model = CriticModelExact(img_side=img_side, num_classes=num_classes, model_arch=args.model_arch).to(device)
     else:
         critic_model = None
     
@@ -498,6 +511,7 @@ def main():
         "marginal_indep": args.marginal_indep,
         "lambda": args._lambda,
         "nuisance_prior": nuisance_prior,
+        "critic_criterion": nn.MSELoss(reduction="none").to(device) if args.in_dataset == "jet_features" else nn.CrossEntropyLoss(reduction="none").to(device) 
     }
 
     cudnn.benchmark = True
@@ -536,7 +550,10 @@ def main():
 
     # evaluate on balanced test dataset
     if args.data_label_correlation != .5:
-        model = get_model(args)
+        if args.model_arch == "mlp":
+            model = get_model_mlp(args)
+        else:
+            model = get_model(args)
         loss, acc, rw_acc = validate(balanced_test_loader, model, criterion, args.epochs + args.reweight_epochs, log, reweight_args)
         if not args.local_testing:
             wandb.run.summary["best_bal_test_acc"] = acc
