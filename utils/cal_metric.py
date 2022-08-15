@@ -19,8 +19,8 @@ def get_curve(dir_name, stypes = ['MSP', 'ODIN']):
     tp, fp = dict(), dict()
     fpr_at_tpr95 = dict()
     for stype in stypes:
-        known = np.loadtxt('{}/confidence_{}_In.txt'.format(dir_name, stype), delimiter='\n')
-        novel = np.loadtxt('{}/confidence_{}_Out.txt'.format(dir_name, stype), delimiter='\n')
+        known = np.loadtxt('{}/confidence_{}_In.txt'.format(dir_name, stype))
+        novel = np.loadtxt('{}/confidence_{}_Out.txt'.format(dir_name, stype))
         known.sort()
         novel.sort()
         end = np.max([np.max(known), np.max(novel)])

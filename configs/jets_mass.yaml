@@ -6,9 +6,9 @@ parameters:
   cosine:
     values:
       - 1
-  # critic_epochs:
-  #   values:
-  #     - 2
+  critic_epochs:
+    values:
+      - 2
   epochs:
     values:
       - 30
@@ -20,7 +20,7 @@ parameters:
       - jet_features
   joint_indep:
     values:
-      - 0
+      # - 0
       - 1
   lr:
     values:
@@ -28,10 +28,10 @@ parameters:
   manualSeed:
     values:
       - 0
-      # - 1
-      # - 2
-      # - 3
-      # - 4
+      - 1
+      - 2
+      - 3
+      - 4
   model_arch:
     values:
       - mlp
@@ -46,6 +46,7 @@ parameters:
       - jets
   reweight:
     values:
+      # - 0
       - 1
   weight_decay:
     values:

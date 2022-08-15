@@ -95,7 +95,8 @@ n_classes_dict = {
     "cmnist": 2,
     "cxr-small": 2,
     "cxr-bal": 2,
-    "celeba": 2
+    "celeba": 2,
+    "jet_features": 2
 }
 
 def MSP(outputs, model):
@@ -391,7 +392,7 @@ def eval_msp_and_odin():
     save_results(results, stypes, args, "msp_and_odin")
 
 
-def get_ood_energy(args, model, val_loader, epoch, log, method):
+def get_ood_energy(args, model, val_loader, epoch, log):
     in_energy = AverageMeter()
     model.eval()
     init = True
@@ -414,7 +415,7 @@ def get_ood_energy(args, model, val_loader, epoch, log, method):
                         epoch, i, len(val_loader), in_energy=in_energy))
         return sum_energy
 
-def get_id_energy(args, model, val_loader, epoch, log, method):
+def get_id_energy(args, model, val_loader, epoch, log):
     in_energy = AverageMeter()
     top1 = AverageMeter()
     all_preds = torch.tensor([])
@@ -493,11 +494,11 @@ def eval_energy():
     print("processing ID dataset")
 
     #********** normal procedure **********
-    id_energy, _, _  = get_id_energy(args, model, testloaderIn, test_epoch, log, method=args.method)
+    id_energy, _, _  = get_id_energy(args, model, testloaderIn, test_epoch, log)
     with open(os.path.join(save_dir, f'energy_score.npy'), 'wb') as f:
         np.save(f, id_energy)
 
-    ood_energy = get_ood_energy(args, model, testloaderOut, test_epoch, log, method=args.method)
+    ood_energy = get_ood_energy(args, model, testloaderOut, test_epoch, log)
     with open(os.path.join(save_dir, f'energy_score_{args.out_dataset}.npy'), 'wb') as f:
         np.save(f, ood_energy)
     actual = np.concatenate((np.zeros_like(id_energy), np.ones_like(ood_energy)))
@@ -513,7 +514,7 @@ if __name__ == '__main__':
         run = wandb.init(id=args.exp_name, project="nurd-ood-" + args.project_name, resume="allow", reinit=True)
         assert run is wandb.run
         wandb.config.update(args, allow_val_change=True)
+    eval_mahalanobis()
     eval_logits()        
     eval_msp_and_odin()
     eval_energy()
-    eval_mahalanobis()

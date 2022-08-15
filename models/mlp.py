@@ -1,5 +1,6 @@
 import torch.nn as nn
-
+import os
+import torch
 
 class MLP(nn.Module):
     def __init__(self, n_feats, num_classes):
@@ -28,7 +29,7 @@ class MLPCritic(nn.Module):
     def __init__(self, n_feats, num_classes):
         super().__init__()
         self.final_block = nn.Sequential(
-            nn.Linear(513, 256),
+            nn.Linear(81, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -47,10 +48,12 @@ class MLPCritic(nn.Module):
         return self.final_block(combined)
 
 def get_model_mlp(args):
+    device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
     model = MLP(n_feats=12, num_classes=2)
-    directory = "/scratch/lhz209/nood/nuisance_ood/src/supervised/checkpoints/{in_dataset}/{name}/{exp}/".format(
+    directory = "/misc/vlgscratch5/RanganathGroup/lily/physics_ood/nuisance-aware-ood-detection/checkpoints/{in_dataset}/{name}/{exp}/".format(
         in_dataset=args.in_dataset, name=args.project_name, exp=args.exp_name)
     model_file = os.path.join(directory, f"checkpoint_main.pth.tar")
     print(model_file)
     model.load_state_dict(torch.load(model_file, map_location=torch.device(device))["state_dict_model"])
+    model.to(device)
     return model

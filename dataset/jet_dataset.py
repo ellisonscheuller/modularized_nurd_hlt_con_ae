@@ -2,7 +2,7 @@ import os
 from collections import Counter
 import numpy as np
 import multiprocessing
-
+import math
 import torch
 from torch.utils.data import DataLoader, Dataset
 import h5py
@@ -84,15 +84,18 @@ class JetFeaturesDataset(Dataset):
       self.labels = data[f"y_{split}"].astype(np.float32)
       self.nuisances = self.features[:, -1]
 
+      # bucket mass into groups, only used when exact = 1
       group_counts = Counter()
-      for y, g in zip(self.labels, self.nuisances):
+      for y, z in zip(self.labels, self.nuisances):
+        g = math.ceil(z//50)
         group_counts[(y, g)] += 1
+      print(group_counts)
       # weights should be inverse of count proportions
       weights = {k: len(self.labels) / v for k, v in group_counts.items()}
       self.weights = {k: v / sum(weights.values()) for k, v in weights.items()}
   
   def __getitem__(self, index):
-    return self.features[index], self.labels[index], self.nuisances[index]
+    return self.features[index], self.labels[index], float(math.ceil(self.nuisances[index]//50))
   
   def __len__(self):
     return len(self.features)
@@ -101,6 +104,16 @@ class JetFeaturesDataset(Dataset):
     proportion_ones = sum(self.labels)/len(self.labels)
     return {1: proportion_ones, 0: 1 - proportion_ones}
   
+  def get_nuisance_prior(self):
+    num_examples = len(self.nuisances)
+    nuisance_counts = Counter()
+    for z in self.nuisances:
+      g = math.ceil(z//50)
+      nuisance_counts[g] += 1
+    nuisance_prior = {k: v/num_examples for k, v in nuisance_counts.items()}
+    print(nuisance_prior)
+    return nuisance_prior
+
 
 def get_jet_features_dataloader(args, data_label_correlation, split, root_dir="datasets", **kwargs):
     kwargs = {'pin_memory': False, 'num_workers': multiprocessing.cpu_count(), 'drop_last': False}

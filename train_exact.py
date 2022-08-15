@@ -276,7 +276,12 @@ def validate(val_loader, model, criterion, epoch, log, reweight_args={}):
     with torch.no_grad():
         end = time.time()
         for inputs, targets, nuisances in val_loader:
-            exact_weights = torch.tensor([reweight_args["val_dataset"].weights[(y.item(), z.item())] for y, z in zip(targets, nuisances)])
+            try:
+                exact_weights = torch.tensor([reweight_args["val_dataset"].weights[(y.item(), z.item())] for y, z in zip(targets, nuisances)])
+            except KeyError:
+                print(reweight_args["val_dataset"].weights)
+                print(y.item(), z.item())
+                import traceback; traceback.print_exec()
             exact_weights = exact_weights.to(device)
             inputs = inputs.to(device)
             targets = targets.long().to(device)
@@ -489,7 +494,7 @@ def main():
     
     if args.joint_indep:
         if args.model_arch == "mlp":
-            critic_model = MLPCritic(n_feats=12, num_classes=num_classes).to(device)
+            critic_model = MLPCritic(n_feats=12, num_classes=2).to(device)
         else:
             critic_model = CriticModelExact(img_side=img_side, num_classes=num_classes, model_arch=args.model_arch).to(device)
     else:
