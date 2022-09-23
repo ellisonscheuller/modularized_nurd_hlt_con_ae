@@ -280,7 +280,7 @@ def validate(val_loader, model, criterion, epoch, log, reweight_args={}):
                 exact_weights = torch.tensor([reweight_args["val_dataset"].weights[(y.item(), z.item())] for y, z in zip(targets, nuisances)])
             except KeyError:
                 print(reweight_args["val_dataset"].weights)
-                print(y.item(), z.item())
+                print([(y.item(), z.item()) for y, z in zip(targets, nuisances)])
                 import traceback; traceback.print_exec()
             exact_weights = exact_weights.to(device)
             inputs = inputs.to(device)

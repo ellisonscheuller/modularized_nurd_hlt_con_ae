@@ -514,7 +514,7 @@ if __name__ == '__main__':
         run = wandb.init(id=args.exp_name, project="nurd-ood-" + args.project_name, resume="allow", reinit=True)
         assert run is wandb.run
         wandb.config.update(args, allow_val_change=True)
-    eval_mahalanobis()
     eval_logits()        
     eval_msp_and_odin()
     eval_energy()
+    eval_mahalanobis()

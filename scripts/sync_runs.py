@@ -12,7 +12,7 @@ if __name__ == "__main__":
     api = wandb.Api()
     print(args.sweep_name)
     sweep = api.sweep(f"{args.sweep_name}")
-    wandb_dir = "/scratch/lhz209/nood/nuisance_ood/src/supervised/wandb/"
+    wandb_dir = "/misc/vlgscratch5/RanganathGroup/lily/physics_ood/nuisance-aware-ood-detection/wandb/"
     for run in sweep.runs:
         # print(run.id)
         run_dir_list = glob.glob(os.path.join(wandb_dir, f"run*{run.id}"))
@@ -21,7 +21,7 @@ if __name__ == "__main__":
         # take the earliest dir
         run_dir = sorted(run_dir_list)[0]
         print(run_dir)
-        # result = subprocess.call(["wandb", "sync", run_dir])
+        result = subprocess.call(["wandb", "sync", run_dir])
     
     # wandb_dir = "/scratch/lhz209/nood/nuisance_ood/src/supervised/wandb/"
     # for run_dir in glob.glob(os.path.join(wandb_dir, f"run-20220314*")):

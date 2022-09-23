@@ -83,19 +83,19 @@ class JetFeaturesDataset(Dataset):
       self.features = data[f"X_{split}"].astype(np.float32)
       self.labels = data[f"y_{split}"].astype(np.float32)
       self.nuisances = self.features[:, -1]
+      self.nuisances = np.array([math.ceil(n//50) for n in self.nuisances]).astype(np.float32)
 
       # bucket mass into groups, only used when exact = 1
       group_counts = Counter()
       for y, z in zip(self.labels, self.nuisances):
-        g = math.ceil(z//50)
-        group_counts[(y, g)] += 1
+        group_counts[(y, z)] += 1
       print(group_counts)
       # weights should be inverse of count proportions
       weights = {k: len(self.labels) / v for k, v in group_counts.items()}
       self.weights = {k: v / sum(weights.values()) for k, v in weights.items()}
   
   def __getitem__(self, index):
-    return self.features[index], self.labels[index], float(math.ceil(self.nuisances[index]//50))
+    return self.features[index], self.labels[index], self.nuisances[index]
   
   def __len__(self):
     return len(self.features)
@@ -108,8 +108,7 @@ class JetFeaturesDataset(Dataset):
     num_examples = len(self.nuisances)
     nuisance_counts = Counter()
     for z in self.nuisances:
-      g = math.ceil(z//50)
-      nuisance_counts[g] += 1
+      nuisance_counts[z] += 1
     nuisance_prior = {k: v/num_examples for k, v in nuisance_counts.items()}
     print(nuisance_prior)
     return nuisance_prior
