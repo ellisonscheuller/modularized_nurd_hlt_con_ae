@@ -835,7 +835,7 @@ def get_loss(data_config, **kwargs):
     return torch.nn.CrossEntropyLoss()
 
 
-class MLPCritic(nn.Module):
+class ParTCritic(nn.Module):
     def __init__(self, n_feats, num_classes):
         super().__init__()
         self.final_block = nn.Sequential(
