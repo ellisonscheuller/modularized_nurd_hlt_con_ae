@@ -1,7 +1,7 @@
 import uproot
 import numpy as np
 import torch
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import Dataset, DataLoader
 import math
 import awkward as ak
 import multiprocessing
@@ -73,8 +73,6 @@ def build_features_and_labels(tree, transform_features=True):
 
     out = {}
     for k, names in feature_list.items():
-        # Stack features along axis=0 to get shape (n_features, n_jets, n_particles)
-        # Then move n_jets to axis=0
         out[k] = np.stack([_pad(a[n], maxlen=128).to_numpy() for n in names], axis=1)  # Shape: (n_jets, n_features, n_particles)
 
     label_list = [
@@ -85,49 +83,26 @@ def build_features_and_labels(tree, transform_features=True):
     
     return out
 
-class JetIterableDataset(IterableDataset):
+class JetDataset(Dataset):
     """
-
+    PyTorch Dataset for loading jet data from ROOT files.
     """
-    def __init__(self, root_files, transform_features=True):
-        self.root_files = root_files
+    def __init__(self, root_files_input, transform_features=True):
         self.transform_features = transform_features
-        # Precompute label and nuisance priors
-        self.total_labels = []
-        self.total_nuisances = []
-        for root_file in self.root_files:
-            # Open the tree from the ROOT file
-            tree = uproot.open(root_file)['tree']
-            table = build_features_and_labels(tree, self.transform_features)
-            y = table['label']
-            labels_scalar = np.argmax(y, axis=1)
-            self.total_labels.extend(labels_scalar)
-            
-            # Compute mass from pf_vectors
-            pf_vectors = table['pf_vectors']  # Shape: (n_jets, n_features, n_particles)
-            px = pf_vectors[:, 0, :]  # Shape: (n_jets, n_particles)
-            py = pf_vectors[:, 1, :]
-            pz = pf_vectors[:, 2, :]
-            E  = pf_vectors[:, 3, :]
+        self.data_list = []
+        self.labels_list = []
+        self.nuisances_list = []
 
-            # Sum over particles (axis=1)
-            total_px = np.sum(px, axis=1)  # Shape: (n_jets,)
-            total_py = np.sum(py, axis=1)
-            total_pz = np.sum(pz, axis=1)
-            total_E  = np.sum(E, axis=1)
-            
-            mass_squared = total_E**2 - (total_px**2 + total_py**2 + total_pz**2)
-            mass_squared = np.maximum(mass_squared, 0)
-            masses = np.sqrt(mass_squared)
-            nuisances = np.array([math.ceil(n // 50) for n in masses]).astype(np.float32)
-            self.total_nuisances.extend(nuisances)
-        
-        self.labels = np.array(self.total_labels)
-        self.nuisances = np.array(self.total_nuisances)
+        # Check if root_files_input is a filename (string) or a list
+        if isinstance(root_files_input, str):
+            # Assume it's a filename containing the list of ROOT files
+            with open(root_files_input, 'r') as f:
+                root_files = [line.strip() for line in f if line.strip()]
+        else:
+            # Assume it's already a list of ROOT files
+            root_files = root_files_input
 
-    def __iter__(self):
-        for root_file in self.root_files:
-            # Open the tree from the ROOT file
+        for root_file in root_files:
             tree = uproot.open(root_file)['tree']
             table = build_features_and_labels(tree, self.transform_features)
             x_particles = table['pf_features']
@@ -136,8 +111,8 @@ class JetIterableDataset(IterableDataset):
             x_points = table['pf_points']
             x_mask = table['pf_mask']
             
-            # Compute mass from pf_vectors
             pf_vectors = x_jets  # Shape: (n_jets, n_features, n_particles)
+
             px = pf_vectors[:, 0, :]  # Shape: (n_jets, n_particles)
             py = pf_vectors[:, 1, :]
             pz = pf_vectors[:, 2, :]
@@ -148,21 +123,45 @@ class JetIterableDataset(IterableDataset):
             total_py = np.sum(py, axis=1)
             total_pz = np.sum(pz, axis=1)
             total_E  = np.sum(E, axis=1)
+
             mass_squared = total_E**2 - (total_px**2 + total_py**2 + total_pz**2)
             mass_squared = np.maximum(mass_squared, 0)
             masses = np.sqrt(mass_squared)
+
             nuisances = np.array([math.ceil(n // 50) for n in masses]).astype(np.float32)
+
             labels_scalar = np.argmax(y, axis=1)
+            
             num_samples = labels_scalar.shape[0]
             for i in range(num_samples):
-                yield (
+                self.data_list.append((
                     x_particles[i], 
                     x_jets[i], 
                     x_points[i], 
-                    x_mask[i], 
-                    labels_scalar[i], 
-                    nuisances[i]
-                )
+                    x_mask[i]
+                ))
+                self.labels_list.append(labels_scalar[i])
+                self.nuisances_list.append(nuisances[i])
+        
+        self.data_list = np.array(self.data_list)
+        self.labels = np.array(self.labels_list)
+        self.nuisances = np.array(self.nuisances_list)
+        group_counts = Counter()
+        for y, z in zip(self.labels, self.nuisances):
+            group_counts[(y, z)] += 1
+        print(group_counts)
+        # Weights should be inverse of count proportions
+        weights = {k: len(self.labels) / v for k, v in group_counts.items()}
+        self.weights = {k: v / sum(weights.values()) for k, v in weights.items()}
+
+    def __getitem__(self, index):
+        x_particles, x_jets, x_points, x_mask = self.data_list[index]
+        label = self.labels[index]
+        nuisance = self.nuisances[index]
+        return x_particles, x_jets, x_points, x_mask, label, nuisance
+
+    def __len__(self):
+        return len(self.labels)
 
     def get_label_prior(self):
         num_classes = np.max(self.labels) + 1
@@ -178,15 +177,23 @@ class JetIterableDataset(IterableDataset):
         print(nuisance_prior)
         return nuisance_prior
 
-def get_iterable_dataloader(args, data_label_correlation, split, root_dir="datasets", **kwargs):
-    kwargs.setdefault('pin_memory', False)
-    kwargs.setdefault('num_workers', multiprocessing.cpu_count())
-    kwargs.setdefault('drop_last', False)
+def get_JetClass_dataloader(args, data_label_correlation, split, root_dir="datasets", **kwargs):
+    # Modify this function to read root files from a file if needed
+    root_files_input = args.root_files
 
-    dataset = JetIterableDataset(root_files=args.root_files, transform_features=True)
+    # Check if root_files_input is a filename (string) or a list
+    if isinstance(root_files_input, str):
+        # Assume it's a filename containing the list of ROOT files
+        with open(root_files_input, 'r') as f:
+            root_files = [line.strip() for line in f if line.strip()]
+    else:
+        # Assume it's already a list of ROOT files
+        root_files = root_files_input
+
+    dataset = JetDataset(root_files=root_files, transform_features=True)
     
     dataloader = DataLoader(dataset=dataset,
                             batch_size=args.batch_size,
-                            shuffle=False,  
+                            shuffle=True,  
                             **kwargs)
     return dataloader
