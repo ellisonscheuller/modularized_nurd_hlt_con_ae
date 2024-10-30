@@ -75,8 +75,7 @@ def build_features_and_labels(tree, transform_features=True):
     for k, names in feature_list.items():
         # Stack features along axis=0 to get shape (n_features, n_jets, n_particles)
         # Then move n_jets to axis=0
-        features = [_pad(a[n], maxlen=128).to_numpy() for n in names]
-        out[k] = np.stack(features, axis=0).transpose(1, 0, 2)  # Shape: (n_jets, n_features, n_particles)
+        out[k] = np.stack([_pad(a[n], maxlen=128).to_numpy() for n in names], axis=1)  # Shape: (n_jets, n_features, n_particles)
 
     label_list = [
         'label_QCD', 'label_Hbb', 'label_Hcc', 'label_Hgg', 'label_H4q',
@@ -106,15 +105,17 @@ class JetIterableDataset(IterableDataset):
             
             # Compute mass from pf_vectors
             pf_vectors = table['pf_vectors']  # Shape: (n_jets, n_features, n_particles)
-            pf_vectors = np.transpose(pf_vectors, (0, 2, 1))
-            px = pf_vectors[:, :, 0]
-            py = pf_vectors[:, :, 1]
-            pz = pf_vectors[:, :, 2]
-            E  = pf_vectors[:, :, 3]
-            total_px = np.sum(px, axis=1)
+            px = pf_vectors[:, 0, :]  # Shape: (n_jets, n_particles)
+            py = pf_vectors[:, 1, :]
+            pz = pf_vectors[:, 2, :]
+            E  = pf_vectors[:, 3, :]
+
+            # Sum over particles (axis=1)
+            total_px = np.sum(px, axis=1)  # Shape: (n_jets,)
             total_py = np.sum(py, axis=1)
             total_pz = np.sum(pz, axis=1)
             total_E  = np.sum(E, axis=1)
+            
             mass_squared = total_E**2 - (total_px**2 + total_py**2 + total_pz**2)
             mass_squared = np.maximum(mass_squared, 0)
             masses = np.sqrt(mass_squared)
@@ -137,12 +138,13 @@ class JetIterableDataset(IterableDataset):
             
             # Compute mass from pf_vectors
             pf_vectors = x_jets  # Shape: (n_jets, n_features, n_particles)
-            pf_vectors = np.transpose(pf_vectors, (0, 2, 1))
-            px = pf_vectors[:, :, 0]
-            py = pf_vectors[:, :, 1]
-            pz = pf_vectors[:, :, 2]
-            E  = pf_vectors[:, :, 3]
-            total_px = np.sum(px, axis=1)
+            px = pf_vectors[:, 0, :]  # Shape: (n_jets, n_particles)
+            py = pf_vectors[:, 1, :]
+            pz = pf_vectors[:, 2, :]
+            E  = pf_vectors[:, 3, :]
+
+            # Sum over particles (axis=1)
+            total_px = np.sum(px, axis=1)  # Shape: (n_jets,)
             total_py = np.sum(py, axis=1)
             total_pz = np.sum(pz, axis=1)
             total_E  = np.sum(E, axis=1)
@@ -177,17 +179,14 @@ class JetIterableDataset(IterableDataset):
         return nuisance_prior
 
 def get_iterable_dataloader(args, data_label_correlation, split, root_dir="datasets", **kwargs):
-    # Set default DataLoader arguments
     kwargs.setdefault('pin_memory', False)
     kwargs.setdefault('num_workers', multiprocessing.cpu_count())
     kwargs.setdefault('drop_last', False)
 
-    # Assume args.root_files is a list of ROOT files
     dataset = JetIterableDataset(root_files=args.root_files, transform_features=True)
     
-    # Since it's an IterableDataset, we cannot shuffle
     dataloader = DataLoader(dataset=dataset,
                             batch_size=args.batch_size,
-                            shuffle=False,  # Cannot shuffle an IterableDataset
+                            shuffle=False,  
                             **kwargs)
     return dataloader
