@@ -839,19 +839,19 @@ class ParTCritic(nn.Module):
     def __init__(self, n_feats, num_classes):
         super().__init__()
         self.final_block = nn.Sequential(
-            nn.Linear(522, 256),
+            nn.Linear(563, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Linear(128, 1)
         )
     
-    def forward(self, rx, y):
+    def forward(self, rx, y, z):
         """
         Predict z from rx, y
 
 
 
         """
-        combined = torch.cat([rx, y], dim=1)  # [batch, 522]
+        combined = torch.cat([rx, y, z], dim=1)  # [batch, 563]
         return self.final_block(combined)
