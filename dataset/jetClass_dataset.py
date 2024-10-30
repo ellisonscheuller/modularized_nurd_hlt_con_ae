@@ -137,7 +137,13 @@ class JetDataset(Dataset):
         self.data_list = np.array(self.data_list)
         self.labels = np.array(self.labels_list)
         self.nuisances = np.array(self.nuisances_list)
-        self.features = self.data_list  
+        group_counts = Counter()
+        for y, z in zip(self.labels, self.nuisances):
+            group_counts[(y, z)] += 1
+        print(group_counts)
+        # weights should be inverse of count proportions
+        weights = {k: len(self.labels) / v for k, v in group_counts.items()}
+        self.weights = {k: v / sum(weights.values()) for k, v in weights.items()}
 
     def __getitem__(self, index):
         x_particles, x_jets, x_points, x_mask = self.data_list[index]
