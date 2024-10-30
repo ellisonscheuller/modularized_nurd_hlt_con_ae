@@ -96,7 +96,6 @@ class JetDataset(Dataset):
         self.labels_list = []
         self.nuisances_list = []
         for root_file in root_files:
-            # Open the tree from the ROOT file
             tree = uproot.open(root_file)['tree']
             table = build_features_and_labels(tree, self.transform_features)
             x_particles = table['pf_features']
@@ -105,36 +104,28 @@ class JetDataset(Dataset):
             x_points = table['pf_points']
             x_mask = table['pf_mask']
             
-            # Compute mass from pf_vectors
             pf_vectors = x_jets  # Shape: (n_jets, n_features, n_particles)
 
-            # Transpose to get shape (n_jets, n_particles, n_features)
             pf_vectors = np.transpose(pf_vectors, (0, 2, 1))
 
-            # Extract features
             px = pf_vectors[:, :, 0]  # Shape: (n_jets, n_particles)
             py = pf_vectors[:, :, 1]
             pz = pf_vectors[:, :, 2]
             E  = pf_vectors[:, :, 3]
 
-            # Sum over particles (axis=1)
             total_px = np.sum(px, axis=1)  # Shape: (n_jets,)
             total_py = np.sum(py, axis=1)
             total_pz = np.sum(pz, axis=1)
             total_E  = np.sum(E, axis=1)
 
-            # Compute mass squared
             mass_squared = total_E**2 - (total_px**2 + total_py**2 + total_pz**2)
             mass_squared = np.maximum(mass_squared, 0)
             masses = np.sqrt(mass_squared)
 
-            # Use the old binning method
             nuisances = np.array([math.ceil(n // 50) for n in masses]).astype(np.float32)
 
-            # Convert labels to scalar labels (assuming multi-class to single label)
             labels_scalar = np.argmax(y, axis=1)
             
-            # Append data to lists
             num_samples = labels_scalar.shape[0]
             for i in range(num_samples):
                 self.data_list.append((
