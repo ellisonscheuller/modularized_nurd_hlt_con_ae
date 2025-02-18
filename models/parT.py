@@ -596,21 +596,30 @@ class ParticleTransformer(nn.Module):
                 cls_tokens = block(x, x_cls=cls_tokens, padding_mask=padding_mask)
 
             x_cls = self.norm(cls_tokens).squeeze(0)
-
+            
             # fc
             if self.fc is None:
                 return x_cls
-            output = self.fc(x_cls)
+
+            # Forward pass through all but the last layer in self.fc
+            if isinstance(self.fc, nn.Sequential):
+                pre_fc_activations = x_cls
+                for layer in self.fc[:-1]:  # Iterate through all layers except the last
+                    pre_fc_activations = layer(pre_fc_activations)
+            else:
+                raise ValueError("self.fc is not a Sequential module as expected")
+
+            # Pass through the final layer
+            final_activations = self.fc[-1](pre_fc_activations)
+
+            # Apply softmax if in inference mode
             if self.for_inference:
-                for layer in self.fc[:-1]:  
-                    x = layer(x)
-                
-                self.fcSave = x.clone()  
+                output = torch.softmax(final_activations, dim=1)
+            else:
+                output = final_activations
 
-                output = self.fc[-1](x)
-
-
-            return output, self.fcSave
+            # Return both the output and pre-final layer activations
+            return output, pre_fc_activations
 
 class ParticleTransformerTagger(nn.Module):
 
@@ -792,7 +801,7 @@ class ParticleTransformerWrapper(torch.nn.Module):
     def forward(self, points, features, lorentz_vectors, mask):
         output, rx = self.mod(features, v=lorentz_vectors, mask=mask)
 
-        return rx, output
+        return output, rx
 
 
 
@@ -836,10 +845,15 @@ def get_loss(data_config, **kwargs):
 
 
 class ParTCritic(nn.Module):
-    def __init__(self, n_feats, num_classes):
+    def __init__(self, embdim):
         super().__init__()
+        # Define transformation layers for `y` and `z`
+        self.y_fc = nn.Linear(64, 128)
+        self.z_fc = nn.Linear(64, 128)
+
+        # Final block as in your original critic
         self.final_block = nn.Sequential(
-            nn.Linear(563, 256),
+            nn.Linear(10+1+embdim, 256),  # Adjust input size to account for concatenated inputs
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -848,10 +862,63 @@ class ParTCritic(nn.Module):
     
     def forward(self, rx, y, z):
         """
-        Predict z from rx, y
+        Args:
+            rx: Tensor of shape [batch, embdim]
+            y: Tensor of shape [batch, 1]
+            z: Tensor of shape [batch, 10]
 
-
-
+        Returns:
+            Output tensor after processing through the critic
         """
-        combined = torch.cat([rx, y, z], dim=1)  # [batch, 563]
-        return self.final_block(combined)
+        # Pass `y` and `z` through fully connected layers
+
+
+        # Expand dimensions of rx, exp_y, and exp_z (optional, not strictly needed here)
+        # rx = rx.unsqueeze(-1)  # If you want an additional dimension, e.g., [batch, embdim, 1]
+        # exp_y = exp_y.unsqueeze(-1)  # If you want an additional dimension, e.g., [batch, 128, 1]
+        # exp_z = exp_z.unsqueeze(-1)  # If you want an additional dimension, e.g., [batch, 128, 1]
+
+        # Concatenate along the last dimension
+
+        combined = torch.cat([rx, y, z], dim=1)  # Concatenated shape: [batch, embdim + 128 + 128]
+        # Pass through the final block
+        return nn.Sigmoid()(self.final_block(combined))
+
+
+class ParTCriticMass(nn.Module):
+    def __init__(self, embdim):
+        super().__init__()
+        # Define transformation layers for `y` and `z`
+        self.y_fc = nn.Linear(64, 128)
+        self.z_fc = nn.Linear(64, 128)
+
+        # Final block as in your original critic
+        self.final_block = nn.Sequential(
+            nn.Linear(embdim, 256),  # Adjust input size to account for concatenated inputs
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+    
+    def forward(self, rx):
+        """
+        Args:
+            rx: Tensor of shape [batch, embdim]
+            y: Tensor of shape [batch, 1]
+            z: Tensor of shape [batch, 10]
+
+        Returns:
+            Output tensor after processing through the critic
+        """
+        # Pass `y` and `z` through fully connected layers
+
+
+        # Expand dimensions of rx, exp_y, and exp_z (optional, not strictly needed here)
+        # rx = rx.unsqueeze(-1)  # If you want an additional dimension, e.g., [batch, embdim, 1]
+        # exp_y = exp_y.unsqueeze(-1)  # If you want an additional dimension, e.g., [batch, 128, 1]
+        # exp_z = exp_z.unsqueeze(-1)  # If you want an additional dimension, e.g., [batch, 128, 1]
+
+        # Concatenate along the last dimension
+        # Pass through the final block
+        return self.final_block(rx)
