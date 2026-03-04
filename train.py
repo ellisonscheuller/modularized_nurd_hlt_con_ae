@@ -339,14 +339,9 @@ def train(model, train_loader, val_loader, optimizer, epoch, log, reweight_args=
     model.train()
     end = time.time()
 
-    # Persistent critic iterator and optimizer — created once per epoch
     if joint_indep_args["joint_indep"]:
         critic_model = joint_indep_args["critic_model"]
-        critic_optimizer = torch.optim.Adam(
-            critic_model.parameters(),
-            lr=joint_indep_args["lr"],
-            weight_decay=joint_indep_args["weight_decay"],
-        )
+        critic_optimizer = joint_indep_args["critic_optimizer"]
         critic_iter = iter(train_loader)
 
     for step, (inputs, targets, nuisances) in enumerate(train_loader):
@@ -845,9 +840,14 @@ def main():
         "reweight_val_only": args.reweight_val_only,
     }
     
+    critic_optimizer = torch.optim.Adam(
+        critic_model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    ) if args.joint_indep else None
+
     joint_indep_args = {
         "joint_indep": args.joint_indep,
         "critic_model": critic_model,
+        "critic_optimizer": critic_optimizer,
         "critic_criterion": critic_criterion,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
