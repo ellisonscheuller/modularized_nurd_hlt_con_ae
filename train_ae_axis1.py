@@ -38,16 +38,6 @@ class PerSampleMSE(nn.Module):
         return per_feat.mean(dim=1)
 
 
-def zero_out_padding_np(X):
-    X = X.copy()
-    pad = (X == 0.0).all(axis=-1)
-    X[pad] = 0.0
-    return X
-
-def flatten_np(x):
-    n, nobj, fdim = x.shape
-    return x.reshape(n, nobj * fdim)
-
 
 def inference(ae, Xz_np, loss_fn, device, batch_size=4096):
     ae.eval()
@@ -103,11 +93,8 @@ def run_ae(config):
     x_train = obj_train_t[:, :, :4].numpy().astype("float32")
     x_test = obj_test_t[:, :, :4].numpy().astype("float32")
 
-    Xtr_raw = zero_out_padding_np(x_train)
-    Xte_raw = zero_out_padding_np(x_test)
-
-    X1_train_raw = flatten_np(Xtr_raw)
-    X1_test_raw = flatten_np(Xte_raw)
+    X1_train_raw = x_train.reshape(len(x_train), -1)
+    X1_test_raw = x_test.reshape(len(x_test), -1)
 
     # standardize using train stats only
     mu1, std1 = fit_standard_scaler(X1_train_raw)
