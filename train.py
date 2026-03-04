@@ -22,16 +22,44 @@ from dataset.cub_dataset import WaterbirdDataset
 from dataset.cmnist_dataset import ColoredMNIST
 import math
 from datetime import datetime
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from dataset.hlt_smcocktail_dataset import HLTSMCocktailDataset
+from models.hlt_contrastive import HLTContrastiveModel
+from models.hlt_critic import HLTCritic
+from models.reweight_hlt import ReweightScalar
+from models.losses import SupConLoss
 
 parser = argparse.ArgumentParser(description=' use resnet (pretrained)')
+
+#added for the HLT contrastive model
+parser.add_argument('--smcocktail_train', type=str, required=True)
+parser.add_argument('--smcocktail_test', type=str, required=True)
+
+parser.add_argument('--val_fraction', type=float, default=0.1)
+parser.add_argument('--split_seed', type=int, default=12345)
+
+parser.add_argument('--ae_scores_train', type=str, default=None) 
+parser.add_argument('--ae_scores_test', type=str, default=None)   
+
+#PF shape / model params (defaults match data file)
+parser.add_argument('--num_tokens', type=int, default=400)
+parser.add_argument('--num_features', type=int, default=7)
+parser.add_argument('--latent_dim', type=int, default=6)
+parser.add_argument('--embed_size', type=int, default=128)
+parser.add_argument('--num_heads', type=int, default=8)
+parser.add_argument('--num_layers', type=int, default=4)
+parser.add_argument('--linear_dim', type=int, default=None)
+parser.add_argument('--pairwise', type=int, default=0)
+
 
 parser.add_argument('--in_dataset', default="celebA", type=str, help='in-distribution dataset e.g. IN-9')
 parser.add_argument('--model_arch', default='resnet18', type=str, help='model architecture e.g. resnet50')
 parser.add_argument('--print_freq', '-p', default=10, type=int,
                     help='print frequency (default: 10)')
 # ID train & val batch size
-parser.add_argument('-b', '--batch_size', default=256, type=int,
-                    help='mini-batch size (default: 64) used for training')
+parser.add_argument('-b', '--batch_size', default=256, type=int, help='mini-batch size (default: 64) used for training')
 # training schedule
 parser.add_argument('--start_epoch', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
@@ -73,6 +101,8 @@ parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--reweight', type=int, default=0,
                             help='reweight the examples during training')
 parser.add_argument('--joint_indep', type=int, default=0, help='add joint independence')
+parser.add_argument('--nurd_lambda', type=float, default=0.1, help='scale factor for NURD penalty term')
+parser.add_argument('--grad_clip', type=float, default=1.0, help='max gradient norm for clipping (0 = disabled)')
 parser.add_argument('--marginal_indep', type=int, default=0,
                         help='add marginal independence, i.e. only r(x) \indep_p_\ind z')
 parser.add_argument('--critic_restart', type=int, default=0)
@@ -158,17 +188,41 @@ def get_weights(targets, nuisances, reweight_model, label_prior):
     # print("prior", prior_weights.min(), prior_weights.max())
     return prior_weights / inv_weights
 
+#def record_metrics(acc, loss, top1, inputs, outputs, targets, losses):
+#    prec1 = accuracy(outputs.data, targets, topk=(1,))[0]
+#    acc.update((torch.max(outputs, dim=1)[1].data == targets).sum().data / len(outputs), inputs.size(0))
+#    loss.update(losses.mean().data, inputs.size(0))
+#    top1.update(prec1, inputs.size(0))
+#    return acc, loss, top1
+
+#def record_rw_metrics(acc, loss, inputs, outputs, targets, losses, weights):
+#    num_correct = torch.max(outputs, dim=1)[1].data == targets
+#    acc.update((num_correct * weights).sum().data / weights.sum().data, inputs.size(0))
+#    loss.update((losses * weights).sum().data / weights.sum().data, inputs.size(0))
+#    return acc, loss
+
 def record_metrics(acc, loss, top1, inputs, outputs, targets, losses):
+    # inputs can be a Tensor OR (x, mask)
+    if isinstance(inputs, (tuple, list)):
+        x = inputs[0]
+    else:
+        x = inputs
+
     prec1 = accuracy(outputs.data, targets, topk=(1,))[0]
-    acc.update((torch.max(outputs, dim=1)[1].data == targets).sum().data / len(outputs), inputs.size(0))
-    loss.update(losses.mean().data, inputs.size(0))
-    top1.update(prec1, inputs.size(0))
+    acc.update((torch.max(outputs, dim=1)[1].data == targets).sum().data / len(outputs), x.size(0))
+    loss.update(losses.mean().data, x.size(0))
+    top1.update(prec1, x.size(0))
     return acc, loss, top1
 
 def record_rw_metrics(acc, loss, inputs, outputs, targets, losses, weights):
+    if isinstance(inputs, (tuple, list)):
+        x = inputs[0]
+    else:
+        x = inputs
+
     num_correct = torch.max(outputs, dim=1)[1].data == targets
-    acc.update((num_correct * weights).sum().data / weights.sum().data, inputs.size(0))
-    loss.update((losses * weights).sum().data / weights.sum().data, inputs.size(0))
+    acc.update((num_correct * weights).sum().data / weights.sum().data, x.size(0))
+    loss.update((losses * weights).sum().data / weights.sum().data, x.size(0))
     return acc, loss
 
 def log_metrics(log, epoch, batch_time, loss, top1, acc, rw_loss=None, rw_acc=None, split=None, log_wandb=True):
@@ -195,91 +249,205 @@ def log_metrics(log, epoch, batch_time, loss, top1, acc, rw_loss=None, rw_acc=No
                 f"{split} rw_acc": rw_acc.avg}, step=epoch)
 
 
-def train(model, train_loader, val_loader, criterion, optimizer, epoch, log, reweight_args={}, joint_indep_args={}, args=None):
-    """Train for one epoch on the training set"""
-    batch_time = AverageMeter()
-    acc = AverageMeter()
-    loss = AverageMeter()
-    top1 = AverageMeter()
-    rw_acc = AverageMeter()
-    rw_loss = AverageMeter()
+def plot_decorrelation(val_loader, model, epoch, args):
+    """
+    Run through val set, collect (embedding, AE score, label), then:
+      1. Profile plot: mean ± std of each embedding dim vs AE score bins
+      2. Per-class Pearson correlation bar chart: |corr(embed_dim, AE_score)| per label
+    Logs figures and scalar correlations to wandb.
+    """
+    model.eval()
+    all_embeds, all_z, all_y = [], [], []
+    with torch.no_grad():
+        for inputs, targets, nuisances in val_loader:
+            if isinstance(inputs, (tuple, list)):
+                x, mask = inputs
+                inputs = (x.to(device), mask.to(device))
+            else:
+                inputs = inputs.to(device)
+            activations, _ = model(inputs)
+            all_embeds.append(activations.cpu())
+            all_z.append(nuisances.cpu())
+            all_y.append(targets.cpu())
+    model.train()
 
-    # switch to train mode
+    embeds = torch.cat(all_embeds, dim=0).numpy()   # [N, latent_dim]
+    z      = torch.cat(all_z,      dim=0).numpy()   # [N]
+    y      = torch.cat(all_y,      dim=0).numpy()   # [N]
+    latent_dim = embeds.shape[1]
+    n_bins = 20
+    z_edges = np.percentile(z, np.linspace(0, 100, n_bins + 1))
+    bin_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+
+    # --- Profile plot (all classes combined) ---
+    fig, axes = plt.subplots(1, latent_dim, figsize=(4 * latent_dim, 3), sharey=False)
+    if latent_dim == 1:
+        axes = [axes]
+    for d, ax in enumerate(axes):
+        means, errs = [], []
+        for i in range(n_bins):
+            in_bin = (z >= z_edges[i]) & (z < z_edges[i + 1])
+            vals = embeds[in_bin, d]
+            means.append(vals.mean() if len(vals) else np.nan)
+            errs.append(vals.std()  if len(vals) else np.nan)
+        ax.errorbar(bin_centers, means, yerr=errs, fmt="o-", markersize=3, capsize=2)
+        ax.set_xlabel("AE reco loss")
+        ax.set_title(f"embed dim {d}")
+        ax.axhline(0, color="gray", lw=0.5, ls="--")
+    fig.suptitle(f"Embedding profile vs AE score  (epoch {epoch})", y=1.02)
+    plt.tight_layout()
+    wandb.log({"decorrelation/profile": wandb.Image(fig)}, step=epoch)
+    plt.close(fig)
+
+    # --- Pearson |corr| per embedding dim, split by class ---
+    classes = np.unique(y)
+    corr_log = {}
+    fig2, ax2 = plt.subplots(figsize=(max(6, latent_dim * 1.5), 4))
+    x_pos = np.arange(latent_dim)
+    width = 0.8 / max(len(classes), 1)
+    for ci, cls in enumerate(classes):
+        mask_cls = y == cls
+        corrs = [abs(np.corrcoef(z[mask_cls], embeds[mask_cls, d])[0, 1]) for d in range(latent_dim)]
+        ax2.bar(x_pos + ci * width, corrs, width=width, label=f"class {int(cls)}")
+        for d, c in enumerate(corrs):
+            corr_log[f"decorrelation/pearson_cls{int(cls)}_dim{d}"] = c
+    ax2.set_xticks(x_pos + width * (len(classes) - 1) / 2)
+    ax2.set_xticklabels([f"dim {d}" for d in range(latent_dim)])
+    ax2.set_ylabel("|Pearson corr|  (embed dim, AE score)")
+    ax2.set_ylim(0, 1)
+    ax2.legend()
+    ax2.set_title(f"Decorrelation check  (epoch {epoch})  — lower is better")
+    plt.tight_layout()
+    wandb.log({"decorrelation/pearson_chart": wandb.Image(fig2)}, step=epoch)
+    plt.close(fig2)
+
+    wandb.log(corr_log, step=epoch)
+
+
+def train(model, train_loader, val_loader, optimizer, epoch, log, reweight_args={}, joint_indep_args={}, args=None, supcon_criterion=None):
+    """Train for one epoch.
+
+    Per batch: n critic gradient steps (on fresh mini-batches from a persistent
+    iterator) followed by 1 main-model gradient step.  This matches the paper's
+    alternating optimisation schedule.
+    """
+    batch_time = AverageMeter()
+    supcon_loss = AverageMeter()
+    nurd_loss = AverageMeter()
+    total_loss = AverageMeter()
+
     model.train()
     end = time.time()
-    batch_idx = 0
-    len_dataloader = 0
-    len_dataloader += len(train_loader)
+
+    # Persistent critic iterator and optimizer — created once per epoch
+    if joint_indep_args["joint_indep"]:
+        critic_model = joint_indep_args["critic_model"]
+        critic_optimizer = torch.optim.Adam(
+            critic_model.parameters(),
+            lr=joint_indep_args["lr"],
+            weight_decay=joint_indep_args["weight_decay"],
+        )
+        critic_iter = iter(train_loader)
+
     for step, (inputs, targets, nuisances) in enumerate(train_loader):
-        inputs = inputs.to(device)
+        # Move main batch to device
+        if isinstance(inputs, (tuple, list)):
+            x, mask = inputs
+            inputs = (x.to(device), mask.to(device))
+        else:
+            inputs = inputs.to(device)
         targets = targets.long().to(device)
-        nuisances = nuisances.to(device)
+        nuisances = nuisances.to(device).float()
         if args.shuffled_label:
             targets = targets[torch.randperm(targets.size()[0])]
-            
-        
-        if joint_indep_args["joint_indep"]:
-            best_loss = None
-            joint_indep_args["critic_model"] = unfreeze_model(joint_indep_args["critic_model"])
-            model = freeze_model(model)
-            critic_optimizer = torch.optim.Adam(joint_indep_args["critic_model"].parameters(), lr=joint_indep_args["lr"], weight_decay=joint_indep_args["weight_decay"])
-            for critic_epoch in range(joint_indep_args["critic_epochs"]):
-                joint_indep_args["critic_model"] = train_critic(joint_indep_args["critic_model"], model, train_loader, criterion, critic_optimizer, critic_epoch, log, 
-                                                                reweight_args=reweight_args, joint_indep_args=joint_indep_args)
-                critic_loss, critic_acc, critic_rw_acc = validate_critic(val_loader, joint_indep_args["critic_model"], model, criterion, critic_epoch, log,
-                                                                        reweight_args=reweight_args, joint_indep_args=joint_indep_args)
-                if not best_loss or critic_loss < best_loss:
-                    best_loss = critic_loss
-                    save_checkpoint(args, {
-                            'epoch': critic_epoch + 1,
-                            'state_dict_model': joint_indep_args["critic_model"].state_dict(),
-                    }, epoch + 1, name="critic")
-                    wandb.run.summary["best_critic_acc"] = critic_acc
-                    wandb.run.summary["best_critic_rw_acc"] = critic_rw_acc
-            # reload and freeze best critic model
-            model_dir = "checkpoints/{in_dataset}/{name}/{exp}/".format(in_dataset=args.in_dataset, name=args.project_name, exp=args.exp_name)
-            model_file = model_dir + 'checkpoint_critic.pth.tar'
-            joint_indep_args["critic_model"].load_state_dict(torch.load(model_file)["state_dict_model"])
-            joint_indep_args["critic_model"] = freeze_model(joint_indep_args["critic_model"])
-            # unfreeze main model
-            model = unfreeze_model(model)
 
+        # --- Phase 1: n critic gradient steps ---
+        if joint_indep_args["joint_indep"]:
+            critic_model = unfreeze_model(critic_model)
+            critic_model.train()
+            for _ in range(joint_indep_args["critic_epochs"]):
+                try:
+                    c_inputs, c_labels, c_nuisances = next(critic_iter)
+                except StopIteration:
+                    critic_iter = iter(train_loader)
+                    c_inputs, c_labels, c_nuisances = next(critic_iter)
+
+                if isinstance(c_inputs, (tuple, list)):
+                    cx, cmask = c_inputs
+                    c_inputs = (cx.to(device), cmask.to(device))
+                else:
+                    c_inputs = c_inputs.to(device)
+                c_labels = c_labels.long().to(device)
+                c_nuisances = c_nuisances.to(device).float()
+
+                with torch.no_grad():
+                    c_activations, _ = model(c_inputs)
+
+                _, _, c_losses, _ = compute_critic_loss(
+                    c_activations, c_labels, c_nuisances,
+                    critic_model, joint_indep_args["critic_criterion"],
+                )
+                # Importance-weight critic loss by w_{y,z} = p(y)/p(y|z) to approx p⊥⊥
+                if reweight_args["reweight"]:
+                    c_weights = get_weights(c_labels, c_nuisances, reweight_args["reweight_model"], label_prior=reweight_args["label_prior"])
+                    c_loss = (c_losses * c_weights.repeat(2)).sum() / c_weights.sum()
+                else:
+                    c_loss = c_losses.mean()
+                critic_optimizer.zero_grad()
+                c_loss.backward()
+                critic_optimizer.step()
+
+            critic_model = freeze_model(critic_model)
+            joint_indep_args["critic_model"] = critic_model
+
+        # --- Phase 2: 1 main-model gradient step ---
         activations, outputs = model(inputs)
-        
-        losses = criterion(outputs, targets)
 
-        # measure accuracy and record loss
-        acc, loss, top1 = record_metrics(acc, loss, top1, inputs, outputs, targets, losses)
+        # SupCon loss on embedding
+        tensor_loss = supcon_criterion(activations.unsqueeze(1), targets)
+        supcon_loss.update(tensor_loss.item(), targets.size(0))
 
-        # compute gradient and do SGD step
+        # NURD penalty: E_{p⊥⊥}[logit(p_γ(c=1|r(x),y,z))] — Eq.(3) of paper
+        # Uses joint (unshuffled) logits; positive when critic can detect dependence.
         if joint_indep_args["joint_indep"]:
-            _, _, pos_neg_losses = compute_critic_loss(inputs, targets, nuisances, model, joint_indep_args["critic_model"], criterion, reweight_args, joint_indep_args)
-            pos_losses = pos_neg_losses[:len(pos_neg_losses)//2]
-            neg_losses = pos_neg_losses[len(pos_neg_losses)//2:]
-            # CE is NLL, so we subtract in opposite direction
-            info_losses = neg_losses - pos_losses
-            losses = losses + info_losses
+            _, _, _, pos_logits = compute_critic_loss(
+                activations, targets, nuisances,
+                critic_model, joint_indep_args["critic_criterion"],
+            )
+            logits_joint = pos_logits[:, 1] - pos_logits[:, 0]  # logit(p(c=1|joint))
+            if reweight_args["reweight"]:
+                weights = get_weights(targets, nuisances, reweight_args["reweight_model"], label_prior=reweight_args["label_prior"])
+                nurd_term = (logits_joint * weights).sum() / weights.sum()
+            else:
+                nurd_term = logits_joint.mean()
+            nurd_term = args.nurd_lambda * nurd_term
+            nurd_loss.update(nurd_term.item(), targets.size(0))
+            tensor_loss = tensor_loss + nurd_term
 
-        if reweight_args["reweight"] and not reweight_args["reweight_val_only"]:
-            weights = get_weights(targets, nuisances, reweight_args["reweight_model"], label_prior=reweight_args["label_prior"])
-            # print("weights", weights.min(), weights.max())
-            rw_acc, rw_loss = record_rw_metrics(rw_acc, rw_loss, inputs, outputs, targets, losses, weights)
-            tensor_loss = (losses * weights).sum() / weights.sum()
-        else:
-            tensor_loss = losses.mean()
-
+        total_loss.update(tensor_loss.item(), targets.size(0))
         optimizer.zero_grad()
         tensor_loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
 
-        # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-            
-        batch_idx += 1
-    log_metrics(log, epoch, batch_time, loss, top1, acc, rw_loss, rw_acc, split="Train")
 
-def validate(val_loader, model, criterion, epoch, log, reweight_args={}):
+    log.debug(
+        f"Train Epoch [{epoch}]  "
+        f"supcon_loss: {supcon_loss.avg:.4f}  "
+        f"nurd_loss: {nurd_loss.avg:.4f}  "
+        f"total_loss: {total_loss.avg:.4f}"
+    )
+    if not args.local_testing:
+        wandb.log({
+            "Train supcon_loss": supcon_loss.avg,
+            "Train nurd_loss":   nurd_loss.avg,
+            "Train total_loss":  total_loss.avg,
+        }, step=epoch)
+
+def validate(val_loader, model, supcon_criterion, epoch, log, reweight_args={}):
     """Perform validation on the validation set"""
     batch_time = AverageMeter()
     acc = AverageMeter()
@@ -293,12 +461,18 @@ def validate(val_loader, model, criterion, epoch, log, reweight_args={}):
     with torch.no_grad():
         end = time.time()
         for inputs, targets, nuisances in val_loader:
-            inputs = inputs.to(device)
+            # inputs may be a tensor OR (x, mask)
+            if isinstance(inputs, (tuple, list)):
+                x, mask = inputs
+                inputs = (x.to(device), mask.to(device))
+            else:
+                inputs = inputs.to(device)
             targets = targets.long().to(device)
             nuisances = nuisances.to(device)
-            # compute output
-            _, outputs = model(inputs)
-            losses = criterion(outputs, targets)
+            nuisances = nuisances.float()
+            # compute output — use SupCon on activations for loss, logits for accuracy
+            activations, outputs = model(inputs)
+            losses = supcon_criterion(activations.unsqueeze(1), targets)
 
             # measure accuracy and record loss
             acc, loss, top1 = record_metrics(acc, loss, top1, inputs, outputs, targets, losses)
@@ -332,6 +506,7 @@ def train_reweight_model(model, train_loader, criterion, optimizer, epoch, log):
     for _, targets, nuisances in train_loader:
         targets = targets.long().to(device)
         nuisances = nuisances.to(device)
+        nuisances = nuisances.float()
 
         _, outputs = model(nuisances)
         
@@ -367,6 +542,7 @@ def validate_reweight_model(val_loader, model, criterion, epoch, log):
         end = time.time()
         for _, targets, nuisances in val_loader:
             nuisances = nuisances.to(device)
+            nuisances = nuisances.float()
             targets = targets.long().to(device)
             # compute output
             _, outputs = model(nuisances)
@@ -383,29 +559,46 @@ def validate_reweight_model(val_loader, model, criterion, epoch, log):
 
     return loss.avg, acc.avg
 
-def compute_critic_loss(inputs, labels, nuisances, model, critic_model, criterion, reweight_args, joint_indep_args):
-    activations, _ = model(inputs)
-    
-    if joint_indep_args["marginal_indep"]:
-        positive_outputs = critic_model(activations, torch.zeros_like(labels.unsqueeze(1)).type(torch.FloatTensor).to(device), nuisances)
-    else:
-        positive_outputs = critic_model(activations, labels.unsqueeze(1).type(torch.FloatTensor).to(device), nuisances)
-    pos_losses = criterion(positive_outputs, torch.ones_like(labels))
+#def compute_critic_loss(inputs, labels, nuisances, model, critic_model, criterion, reweight_args, joint_indep_args):
+#    activations, _ = model(inputs)
+#    
+#    if joint_indep_args["marginal_indep"]:
+#        positive_outputs = critic_model(activations, torch.zeros_like(labels.unsqueeze(1)).type(torch.FloatTensor).to(device), nuisances)
+#    else:
+#        positive_outputs = critic_model(activations, labels.unsqueeze(1).type(torch.FloatTensor).to(device), nuisances)
+#    pos_losses = criterion(positive_outputs, torch.ones_like(labels))
 
-    shuffled_nuisances = nuisances[torch.randperm(nuisances.size()[0])]
-    if joint_indep_args["marginal_indep"]:
-        negative_outputs = critic_model(activations, torch.zeros_like(labels.unsqueeze(1)).type(torch.FloatTensor).to(device), shuffled_nuisances)
-    else:
-        negative_outputs = critic_model(activations, labels.unsqueeze(1).type(torch.FloatTensor).to(device), shuffled_nuisances)
-    neg_losses = criterion(negative_outputs, torch.zeros_like(labels))
+#    shuffled_nuisances = nuisances[torch.randperm(nuisances.size()[0])]
+#    if joint_indep_args["marginal_indep"]:
+#        negative_outputs = critic_model(activations, torch.zeros_like(labels.unsqueeze(1)).type(torch.FloatTensor).to(device), shuffled_nuisances)
+#    else:
+#        negative_outputs = critic_model(activations, labels.unsqueeze(1).type(torch.FloatTensor).to(device), shuffled_nuisances)
+#    neg_losses = criterion(negative_outputs, torch.zeros_like(labels))
 
-    outputs = torch.cat([positive_outputs, negative_outputs], dim=0)
-    targets = torch.cat([torch.ones_like(labels), torch.zeros_like(labels)], dim=0)
-    losses = torch.cat([pos_losses, neg_losses], dim=0)  # unweighted
-    assert outputs.shape[0] == targets.shape[0] == 2 * len(inputs)
-    return outputs, targets, losses
+#    outputs = torch.cat([positive_outputs, negative_outputs], dim=0)
+#    targets = torch.cat([torch.ones_like(labels), torch.zeros_like(labels)], dim=0)
+#    losses = torch.cat([pos_losses, neg_losses], dim=0)  # unweighted
+#    assert outputs.shape[0] == targets.shape[0] == 2 * len(inputs)
+#    return outputs, targets, losses
 
-def train_critic(critic_model, model, train_loader, criterion, optimizer, epoch, log, reweight_args={}, joint_indep_args={}):
+def compute_critic_loss(activations, labels, nuisances, critic_model, critic_criterion):
+    # Joint (positive): (rx, y, z)
+    pos_logits = critic_model(activations, labels, nuisances)  # [B,2]
+    pos_t = torch.ones(labels.size(0), dtype=torch.long, device=labels.device)  # joint = 1
+    pos_losses = critic_criterion(pos_logits, pos_t)
+
+    # Shuffled (negative): shuffle nuisances only
+    shuffled_nuisances = nuisances[torch.randperm(nuisances.size(0))]
+    neg_logits = critic_model(activations, labels, shuffled_nuisances)  # [B,2]
+    neg_t = torch.zeros(labels.size(0), dtype=torch.long, device=labels.device)  # shuffled = 0
+    neg_losses = critic_criterion(neg_logits, neg_t)
+
+    outputs = torch.cat([pos_logits, neg_logits], dim=0)
+    targets = torch.cat([pos_t, neg_t], dim=0)
+    losses = torch.cat([pos_losses, neg_losses], dim=0)
+    return outputs, targets, losses, pos_logits
+
+def train_critic(critic_model, model, train_loader, optimizer, epoch, log, reweight_args={}, joint_indep_args={}):
     batch_time = AverageMeter()
     acc = AverageMeter()
     loss = AverageMeter()
@@ -418,12 +611,21 @@ def train_critic(critic_model, model, train_loader, criterion, optimizer, epoch,
     len_dataloader = 0
     len_dataloader += len(train_loader)
     for inputs, labels, nuisances in train_loader:
-        inputs = inputs.to(device)
+        #inputs = inputs.to(device)
+        # inputs may be a tensor OR (x, mask)
+        if isinstance(inputs, (tuple, list)):
+            x, mask = inputs
+            inputs = (x.to(device), mask.to(device))
+        else:
+            inputs = inputs.to(device)
         labels = labels.long().to(device)
         nuisances = nuisances.to(device)
-        outputs, targets, losses = compute_critic_loss(
-            inputs, labels, nuisances, model, critic_model, criterion, reweight_args, joint_indep_args)
-        
+        nuisances = nuisances.float()
+        with torch.no_grad():
+            activations, _ = model(inputs)
+        outputs, targets, losses, _ = compute_critic_loss(
+            activations, labels, nuisances, critic_model, joint_indep_args["critic_criterion"])
+
         # unweighted metrics
         # measure accuracy and record loss
         acc, loss, top1 = record_metrics(acc, loss, top1, nuisances, outputs, targets, losses)
@@ -450,7 +652,7 @@ def train_critic(critic_model, model, train_loader, criterion, optimizer, epoch,
 
     return critic_model
 
-def validate_critic(val_loader, critic_model, model, criterion, epoch, log, reweight_args={}, joint_indep_args={}):
+def validate_critic(val_loader, critic_model, model, epoch, log, reweight_args={}, joint_indep_args={}):
     batch_time = AverageMeter()
     acc = AverageMeter()
     loss = AverageMeter()
@@ -465,12 +667,20 @@ def validate_critic(val_loader, critic_model, model, criterion, epoch, log, rewe
     with torch.no_grad():
         end = time.time()
         for inputs, labels, nuisances in val_loader:
-            inputs = inputs.to(device)
+            #inputs = inputs.to(device)
+            # inputs may be a tensor OR (x, mask)
+            if isinstance(inputs, (tuple, list)):
+                x, mask = inputs
+                inputs = (x.to(device), mask.to(device))
+            else:
+                inputs = inputs.to(device)
             labels = labels.long().to(device)
             nuisances = nuisances.to(device)
-            outputs, targets, losses = compute_critic_loss(
-                inputs, labels, nuisances, model, critic_model, criterion, reweight_args, joint_indep_args)
-            
+            nuisances = nuisances.float()
+            activations, _ = model(inputs)
+            outputs, targets, losses, _ = compute_critic_loss(
+                activations, labels, nuisances, critic_model, joint_indep_args["critic_criterion"])
+
             # unweighted metrics
             # measure accuracy and record loss
             acc, loss, top1 = record_metrics(acc, loss, top1, nuisances, outputs, targets, losses)
@@ -521,32 +731,77 @@ def main():
     log.addHandler(streamHandler) 
 
     # get data
-    if args.in_dataset == "waterbird":
-        dataset_class = WaterbirdDataset
-    elif args.in_dataset == "cmnist":
-        dataset_class = ColoredMNIST
-    else:
-        raise ValueError(f"in_dataset not supported: {args.in_dataset}.")
+    #if args.in_dataset == "waterbird":
+    #    dataset_class = WaterbirdDataset
+    #elif args.in_dataset == "cmnist":
+    #    dataset_class = ColoredMNIST
+    #else:
+    #    raise ValueError(f"in_dataset not supported: {args.in_dataset}.")
     
-    train_dataset = dataset_class(args, "train")
-    val_dataset = dataset_class(args, "val")
-    test_dataset = dataset_class(args, "test")
+    #train_dataset = dataset_class(args, "train")
+    #val_dataset = dataset_class(args, "val")
+    #test_dataset = dataset_class(args, "test")
+
+    train_dataset = HLTSMCocktailDataset(
+        smcocktail_path=args.smcocktail_train,
+        split="train",
+        val_fraction=args.val_fraction,
+        seed=args.split_seed,
+        ae_scores_path=args.ae_scores_train,
+    )
+
+    val_dataset = HLTSMCocktailDataset(
+        smcocktail_path=args.smcocktail_train,
+        split="val",
+        val_fraction=args.val_fraction,
+        seed=args.split_seed,
+        ae_scores_path=args.ae_scores_train,
+    )
+
+    test_dataset = HLTSMCocktailDataset(
+        smcocktail_path=args.smcocktail_test,
+        split="test",
+        val_fraction=args.val_fraction,
+        seed=args.split_seed,
+        ae_scores_path=args.ae_scores_test,
+    )
 
     kwargs = {'pin_memory': True, 'num_workers': 8, 'drop_last': True}
     train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=False, **kwargs)
     val_loader = DataLoader(dataset=val_dataset, batch_size=args.batch_size, shuffle=False, **kwargs)
-    label_prior = train_dataset.get_label_prior()    
+    #label_prior = train_dataset.get_label_prior()
+    y_np = train_dataset.y.cpu().numpy()  # train split labels
+    num_classes = 4
+    counts = np.bincount(y_np, minlength=num_classes).astype(np.float64)  # num_classes=4 (no ZeroBias)
+    label_prior = counts / counts.sum()
+    print("label_prior:", label_prior)
     
     balanced_test_loader = DataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=False, **kwargs)
 
 
     
     img_side_dict = {"waterbird": 224, "cxr": 224, "cxr-bal": 224, "cifar10": 32, "cmnist": 28, "cxr-small": 32, "celeba": 224}
-    img_side = img_side_dict[args.in_dataset]
-    num_classes_dict = {"waterbird": 2, "cxr": 2, "cxr-bal": 2, "cifar10": 10, "cmnist": 2, "cxr-small": 2, "celeba": 2}
-    num_classes = num_classes_dict[args.in_dataset]
+    img_side = img_side_dict.get(args.in_dataset, None)
+    #num_classes_dict = {"waterbird": 2, "cxr": 2, "cxr-bal": 2, "cifar10": 10, "cmnist": 2, "cxr-small": 2, "celeba": 2}
+    #num_classes = num_classes_dict[args.in_dataset]
 
-    if args.model_arch == "resnet18":
+    #if args.model_arch == "resnet18":
+    #    base_model = load_model(orig=img_side==224, num_classes=num_classes)
+    #else:
+    #   base_model = SimpleClassifier(img_side=img_side, num_classes=num_classes)
+    if args.model_arch == "hlt_contrastive":
+        base_model = HLTContrastiveModel(
+            num_classes=num_classes,
+            num_features=args.num_features,
+            num_tokens=args.num_tokens,
+            latent_dim=args.latent_dim,
+            linear_dim=args.linear_dim,
+            embed_size=args.embed_size,
+            num_heads=args.num_heads,
+            num_layers=args.num_layers,
+            pairwise=(args.pairwise == 1),
+        )
+    elif args.model_arch == "resnet18":
         base_model = load_model(orig=img_side==224, num_classes=num_classes)
     else:
         base_model = SimpleClassifier(img_side=img_side, num_classes=num_classes)
@@ -557,19 +812,29 @@ def main():
 
     model = base_model.to(device)
     criterion = nn.CrossEntropyLoss(reduction="none").to(device)
+    critic_criterion = nn.CrossEntropyLoss(reduction="none").to(device)
+    supcon_criterion = SupConLoss().to(device)
     if args.optimizer == "adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     elif args.optimizer == "sgd":
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
 
     if args.reweight:
-        reweight_model = copy.deepcopy(base_model).to(device)
+        reweight_model = ReweightScalar(num_classes=num_classes).to(device)
         reweight_optimizer = torch.optim.Adam(reweight_model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:
         reweight_model = None
     
+    #if args.joint_indep:
+        #critic_model = CriticModel(img_side=img_side, num_classes=num_classes, model_arch=args.model_arch).to(device)
+    #else:
+        #critic_model = None
+
     if args.joint_indep:
-        critic_model = CriticModel(img_side=img_side, num_classes=num_classes, model_arch=args.model_arch).to(device)
+        if args.model_arch == "hlt_contrastive":
+            critic_model = HLTCritic(rep_dim=args.latent_dim).to(device)
+        else:
+            critic_model = CriticModel(img_side=img_side, num_classes=num_classes, model_arch=args.model_arch).to(device)
     else:
         critic_model = None
     
@@ -583,6 +848,7 @@ def main():
     joint_indep_args = {
         "joint_indep": args.joint_indep,
         "critic_model": critic_model,
+        "critic_criterion": critic_criterion,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "critic_epochs": args.critic_epochs,
@@ -637,9 +903,11 @@ def main():
     for epoch in range(args.start_epoch, args.epochs):
         log.debug(f"Start training epoch {epoch}")
         adjust_learning_rate(args, optimizer, epoch)
-        train(model, train_loader, val_loader, criterion, optimizer, epoch + args.reweight_epochs, log,
-            reweight_args=reweight_args, joint_indep_args=joint_indep_args, args=args)
-        loss, acc, rw_acc = validate(val_loader, model, criterion, epoch + args.reweight_epochs, log, reweight_args)
+        train(model, train_loader, val_loader, optimizer, epoch + args.reweight_epochs, log,
+            reweight_args=reweight_args, joint_indep_args=joint_indep_args, args=args, supcon_criterion=supcon_criterion)
+        loss, acc, rw_acc = validate(val_loader, model, supcon_criterion, epoch + args.reweight_epochs, log, reweight_args)
+        if not args.local_testing:
+            plot_decorrelation(val_loader, model, epoch + args.reweight_epochs, args)
         if not best_loss or loss < best_loss:
             best_loss = loss
             log.debug("Saving main checkpoint")
@@ -653,7 +921,7 @@ def main():
 
     # evaluate on balanced test dataset
     model = get_model(args)
-    loss, acc, rw_acc = validate(balanced_test_loader, model, criterion, args.epochs + args.reweight_epochs + 1, log, reweight_args)
+    loss, acc, rw_acc = validate(balanced_test_loader, model, supcon_criterion, args.epochs + args.reweight_epochs + 1, log, reweight_args)
     if not args.local_testing:
         wandb.run.summary["best_bal_test_acc"] = acc
 
