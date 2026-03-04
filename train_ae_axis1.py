@@ -38,60 +38,6 @@ class PerSampleMSE(nn.Module):
         return per_feat.mean(dim=1)
 
 
-def describe_pt(obj, name="pt"):
-    if torch.is_tensor(obj):
-        print(f"{name}: Tensor shape={tuple(obj.shape)} dtype={obj.dtype}")
-    elif isinstance(obj, dict):
-        print(f"{name}: dict with keys={list(obj.keys())}")
-        for k, v in obj.items():
-            if torch.is_tensor(v):
-                print(f" - {k}: Tensor shape={tuple(v.shape)} dtype={v.dtype}")
-            else:
-                print(f" - {k}: type={type(v)}")
-    else:
-        print(f"{name}: type={type(obj)}")
-
-def select_objects_view(pt_obj, objects_key=None):
-    event_id = None
-
-    if torch.is_tensor(pt_obj):
-        return pt_obj, event_id
-
-    if not isinstance(pt_obj, dict):
-        raise TypeError(f"Unsupported .pt format: {type(pt_obj)}")
-
-    for eid_k in ["event_id", "eventid", "evt_id", "eid", "EventID"]:
-        if eid_k in pt_obj:
-            event_id = pt_obj[eid_k]
-            break
-
-    if objects_key is not None:
-        if objects_key not in pt_obj:
-            raise KeyError(f"objects_key='{objects_key}' not found. Available keys: {list(pt_obj.keys())}")
-        return pt_obj[objects_key], event_id
-
-    # try common key names
-    candidates = [
-        "objects", "obj", "x_obj", "X_obj",
-        "hlt_objects", "hlt_obj",
-        "p4", "features_obj",
-    ]
-    for k in candidates:
-        if k in pt_obj and torch.is_tensor(pt_obj[k]):
-            return pt_obj[k], event_id
-
-    # fall back to first 3d tensor
-    for k, v in pt_obj.items():
-        if torch.is_tensor(v) and v.ndim == 3:
-            return v, event_id
-
-    raise KeyError(
-        "Could not automatically find an objects tensor in the dict. "
-        f"Keys were: {list(pt_obj.keys())}. "
-        "Pass config['objects_key'] to select explicitly."
-    )
-
-
 def zero_out_padding_np(X):
     X = X.copy()
     pad = (X == 0.0).all(axis=-1)
@@ -141,22 +87,17 @@ def run_ae(config):
 
     print("Loading train .pt:", train_path, flush=True)
     pt_train = torch.load(train_path, map_location="cpu")
-    describe_pt(pt_train, "train_pt")
 
     print("Loading test .pt:", test_path, flush=True)
     pt_test = torch.load(test_path, map_location="cpu")
-    describe_pt(pt_test, "test_pt")
 
-    obj_train_t, eid_train = select_objects_view(pt_train, objects_key=config.get("objects_key", None))
-    obj_test_t, eid_test = select_objects_view(pt_test, objects_key=config.get("objects_key", None))
+    obj_train_t = pt_train["obj"]  # [N, 23, 4]
+    obj_test_t = pt_test["obj"]
+    eid_train = pt_train.get("eventid", None)
+    eid_test = pt_test.get("eventid", None)
 
-    print("Selected objects tensors:", flush=True)
-    print("  train objects:", tuple(obj_train_t.shape), obj_train_t.dtype, flush=True)
-    print("  test  objects:", tuple(obj_test_t.shape), obj_test_t.dtype, flush=True)
-    if eid_train is not None:
-        print("  train event_id:", tuple(eid_train.shape) if torch.is_tensor(eid_train) else type(eid_train), flush=True)
-    if eid_test is not None:
-        print("  test  event_id:", tuple(eid_test.shape) if torch.is_tensor(eid_test) else type(eid_test), flush=True)
+    print("train objects:", tuple(obj_train_t.shape), obj_train_t.dtype, flush=True)
+    print("test  objects:", tuple(obj_test_t.shape), obj_test_t.dtype, flush=True)
 
     # only use first 4 features (pt, eta, phi, type_id)
     x_train = obj_train_t[:, :, :4].numpy().astype("float32")
