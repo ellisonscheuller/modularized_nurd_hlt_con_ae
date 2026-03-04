@@ -476,6 +476,29 @@ def resnet50_fractaldb(pretrained: bool = False, progress: bool = True, **kwargs
 def get_model(args):
     import os
     device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+
+    if args.model_arch == "hlt_contrastive":
+        from models.hlt_contrastive import HLTContrastiveModel
+        model = HLTContrastiveModel(
+            num_classes=4,
+            num_features=args.num_features,
+            num_tokens=args.num_tokens,
+            latent_dim=args.latent_dim,
+            linear_dim=args.linear_dim,
+            embed_size=args.embed_size,
+            num_heads=args.num_heads,
+            num_layers=args.num_layers,
+            pairwise=(args.pairwise == 1),
+        )
+        if not args.random_init:
+            local_dir = "checkpoints/{in_dataset}/{name}/{exp}/".format(
+                in_dataset=args.in_dataset, name=args.project_name, exp=args.exp_name)
+            model_file = os.path.join(local_dir, "checkpoint_main.pth.tar")
+            print(model_file)
+            model.load_state_dict(torch.load(model_file, map_location=device)["state_dict_model"])
+        model.to(device)
+        return model
+
     if not args.random_init:
         if args.fractal_db:
             # model_file = "/scratch/lhz209/nood/data/FractalDB-1000_resnet50_epoch90.pth"
