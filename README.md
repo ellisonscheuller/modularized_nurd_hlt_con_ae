@@ -1,19 +1,53 @@
-# Robustness to Spurious Correlations Improves Semantic Out-of-distribution Detection
+## Learning Representation
 
-### Overview
-![](fig1.png)
+The goal is to create representations of physics events which are more sensitive to New Physics than those currently used.  
 
-### Set Up
-All experiments were conducted on CentOS 8.2.2004 with Python 3.8.5 and Pytorch 1.10.2. See `requirements.txt` for further details.
+Traditional supervised learning requires labelled data and is limited in generalisation to unseen physics. Our objective is to learn a **semantically meaningful representation** of each event without explicit labels, so that:
 
-### Data
-To begin, first download:
-1. [Caltech-UCSD Birds-200-2011](https://vision.cornell.edu/se3/caltech-ucsd-birds-200/)
-2. [PlacesBG](http://places2.csail.mit.edu/download.html)
-3. [CelebA](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html)
+- Signal/background separation becomes linearly separable.
+- Anomalies (e.g., exotic decays) can be detected via unsupervised scoring.
 
-See `scripts/dataset_creation` for scripts generating Waterbirds in-distribution and shared-nuisance out-of-distribution datasets. Place the data in the location corresponding to `root_dir` or `save_dir` in each of the dataset files. Otherwise, data is downloaded automatically from torchvision in the location specified by `root_dir` or `save_dir`.
+---
 
-### Quickstart
-Experiments were run using [Weights and Biases](https://wandb.ai/site). To use, simply create an account, enter your API key locally where experiments will be run, initialize a sweep via `wandb sweep <path/to/config>`, and launch agents via `wandb agent <username/project_name/sweep_id>`. See [Weights and Biases documentation](https://docs.wandb.ai/guides/sweeps/quickstart#4.-launch-agent-s) for further details on sweeps.
+## Method: Masked Particle Modelling (JEPA-like)
 
+We use a strategy based on **masked-particle prediction**, where:
+
+- A subset of PUPPI candidates is masked.
+- The model is trained to predict the representation of the masked candidates based on the context.
+
+This forces the model to learn event-level structure and particle correlations in the latent space.
+
+However, because particle features are drawn from complex distributions that are difficult to model, the prediction takes place in latent space.
+
+### Architecture Diagram
+
+![JEPA Framework Diagram](https://images.prismic.io/encord/64b9cc18-dcb9-4fd1-95c4-c5f34f4f0877_image8.png?auto=compress,format)
+
+*Just instead of pixels, we have particles.*
+
+### Losses Used
+
+1. **Latent Prediction Loss** (JEPA style):  
+   Predict masked latent vectors directly rather than original features.  
+   See: [I-JEPA: Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture](https://arxiv.org/abs/2301.08243)
+
+2. **DeepCluster-style Clustering Loss** ([Caron et al., 2018](https://arxiv.org/abs/1807.05520)):  
+   Encourages compact, separable cluster structures in latent space. Target clusters are formed from particle feature clusters to provide weak supervision.
+
+---
+
+## Reinforcement Learning Fine-Tuning (WIP)
+
+During fine-tuning, I experiment with **reinforcement learning (RL)**, where an agent learns:
+
+- Which particles to mask to maximise separation.
+- Reward is based on linear probe classification accuracy in latent space.
+
+This leads to **adaptive masking policies** that exploit physics-specific cues to optimise downstream performance.
+
+---
+To run training on a Kubernetes cluster, use the manifest:
+```kubeflow/jepa_rl_pipeline.yaml```
+
+this Docker container can be used: https://gitlab.cern.ch/groups/cms-phase2-repr-learning/-/container_registries
