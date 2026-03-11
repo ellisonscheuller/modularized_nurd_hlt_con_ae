@@ -24,22 +24,25 @@ class PUPPIDataset(torch.utils.data.Dataset):
 
 class PFCandsDataset(torch.utils.data.Dataset):
     def __init__(
-            self, 
-            data: torch.Tensor, 
-            labels: torch.Tensor, 
-            device: torch.device, 
+            self,
+            data: torch.Tensor,
+            labels: torch.Tensor,
+            device: torch.device,
+            obj_features: torch.Tensor = None,
         ):
         self.data = data
         self.device = device
         self.labels = labels
-    
+        self.obj_features = obj_features  # [N, obj_feat_dim] normalised object-level features for AE
+
     def __len__(self) -> int:
         return self.data.shape[0]
-    
+
     def make_padding_mask(self, x: torch.Tensor) -> torch.Tensor:
-        return x[..., 0] == 0  
+        return x[..., 0] == 0
 
     def __getitem__(self, idx: int) -> tuple:
         to_return = (self.data[idx], self.make_padding_mask(self.data[idx]))
         to_return += (self.labels[idx],) if self.labels is not None else ()
+        to_return += (self.obj_features[idx],) if self.obj_features is not None else ()
         return to_return

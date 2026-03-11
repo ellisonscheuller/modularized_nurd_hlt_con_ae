@@ -21,6 +21,14 @@ def clean_data(data: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 def load_data(path: str, map_location: torch.device, max_events=-1) -> tuple[torch.Tensor, torch.Tensor]:
     data = torch.load(path, map_location=map_location)
+    if isinstance(data, dict):
+        feature_block = data['pf']
+        label_block = data['label'].long()
+        if max_events > 0:
+            feature_block = feature_block[:max_events]
+            label_block = label_block[:max_events]
+        feature_block = torch.nan_to_num(feature_block, nan=0.0, posinf=0.0, neginf=0.0)
+        return feature_block, label_block
     data = data[:max_events] if max_events > 0 else data
     return clean_data(data)
 
