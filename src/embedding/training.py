@@ -6,6 +6,7 @@ from sklearn.model_selection import train_test_split
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
 from embedding.dataloader import PFCandsDataset, PUPPIDataset
+from embedding.loss import distance_corr
 from embedding.utils.data_utils import delta_r_from_normalized
 from embedding.utils.data_utils import EPS
 from typing import Union
@@ -58,14 +59,16 @@ def make_train_val_split(features, y, val_size=0.10, random_state=42, y_are_labe
     return X_tr, y_tr, X_val, y_val, idx_tr, idx_val
 
 def build_train_val_loaders(
-    X_tr, y_tr, X_val, y_val, device, batch_size=2048, pfcands=False
+    X_tr, y_tr, X_val, y_val, device, batch_size=2048, pfcands=False,
+    obj_tr=None, obj_val=None,
 ):
     """
     Builds DataLoaders. IMPORTANT: pass TRAIN norm_constants to BOTH loaders.
+    obj_tr/val: optional [N, D] tensors of normalised object-level features for the AE.
     """
     if pfcands:
-        ds_tr  = PFCandsDataset(X_tr,  y_tr, device)
-        ds_val = PFCandsDataset(X_val, y_val, device)
+        ds_tr  = PFCandsDataset(X_tr,  y_tr, device, obj_features=obj_tr)
+        ds_val = PFCandsDataset(X_val, y_val, device, obj_features=obj_val)
     else:
         ds_tr  = PUPPIDataset(X_tr,  y_tr,  device=device)
         ds_val = PUPPIDataset(X_val, y_val, device=device)
@@ -74,31 +77,59 @@ def build_train_val_loaders(
     val_loader   = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=0)
     return train_loader, val_loader
 
+def _proxy_md(embeddings, labels, qcd_label=1):
+    """
+    Cosine distance from the QCD centroid in the (L2-normalized) embedding space.
+    Returns a [B] scalar tensor per event.
+    """
+    qcd_mask = (labels == qcd_label)
+    if qcd_mask.sum() > 1:
+        centroid = F.normalize(embeddings[qcd_mask].mean(dim=0), dim=0)
+        return 1.0 - (embeddings * centroid).sum(dim=1)
+    return torch.zeros(embeddings.size(0), device=embeddings.device)
+
+
 def train_epoch(
     encoder, projector, classifier,
-    ce_loss_fn, contrastive_loss,  # contrastive_loss =  InfoNCE (supervised) or SSL loss
+    ce_loss_fn, contrastive_loss,
     train_loader, norm_constants, device,
     optimizer, scheduler=None, contrastive_weight=0.05,
-    pairwise=False, num_classes=4,
-    scaler=None
+    pairwise=False, num_classes=4, scaler=None,
+    ae_model=None, ae_reco_weight=1.0, disco_weight=0.0, qcd_label=1,
 ):
     """
-    One training epoch. Mirrors current logic, returns averaged metrics.
+    One training epoch.
+
+    If ae_model is provided and disco_weight > 0, runs double DisCo:
+    - AE forward pass on object-level features  → per-event reco loss (axis 1)
+    - Contrastive proxy MD from embeddings       → per-event score    (axis 2)
+    - DisCo between the two on QCD events backpropagates through BOTH models.
+
+    Total loss = w_con*contrast + w_ce*ce + ae_reco_weight*ae_reco + disco_weight*disco
+    (DataLoader must yield a 4th element: normalised obj features [B, D] when ae_model is set)
     """
-
     encoder.train(); projector.train(); classifier.train()
+    if ae_model is not None:
+        ae_model.train()
 
-    total_loss = total_contrast = total_ce = 0.0
+    total_loss = total_contrast = total_ce = total_ae = total_disco = 0.0
     count = 0
     scheduled_contrst_wght = not (isinstance(contrastive_weight, int) or isinstance(contrastive_weight, float))
     class_metrics = ClassificationMetrics(num_classes)
+    mse_no_reduce = torch.nn.MSELoss(reduction="none")
 
-    for x, mask, labels in train_loader:
+    for batch in train_loader:
+        if len(batch) == 4:
+            x, mask, labels, obj = batch
+            obj = obj.to(device)
+        else:
+            x, mask, labels = batch
+            obj = None
+
         x = x.to(device)
         mask = mask.to(device)
         labels = labels.to(device)
 
-        # prepend CLS bit
         mask = torch.cat([
             torch.zeros(mask.size(0), 1, device=mask.device, dtype=torch.bool),
             mask.bool()
@@ -110,16 +141,38 @@ def train_epoch(
         optimizer.zero_grad()
 
         with torch.cuda.amp.autocast(enabled=use_amp):
+            # ── contrastive branch ──
             latent = encoder(x, delta_r, mask)
             embeddings = F.normalize(projector(latent), dim=1)
 
-            loss_constrast = contrastive_loss(embeddings, labels)
-            logits   = classifier(embeddings)
-            loss_ce  = ce_loss_fn(logits, labels)
+            loss_contrast = contrastive_loss(embeddings, labels)
+            logits  = classifier(embeddings)
+            loss_ce = ce_loss_fn(logits, labels)
 
             contrast_weight_value = contrastive_weight.get() if scheduled_contrst_wght else contrastive_weight
-            loss = contrast_weight_value * loss_constrast + (1 - contrast_weight_value) * loss_ce
-        
+            loss = contrast_weight_value * loss_contrast + (1 - contrast_weight_value) * loss_ce
+
+            # ── AE branch + DisCo ──
+            loss_ae = torch.tensor(0.0, device=device)
+            loss_disco = torch.tensor(0.0, device=device)
+            if ae_model is not None and obj is not None:
+                recon, _ = ae_model(obj)
+                ae_reco_per_event = mse_no_reduce(recon, obj).mean(dim=1)  # [B]
+                loss_ae = ae_reco_per_event.mean()
+                loss = loss + ae_reco_weight * loss_ae
+
+                if disco_weight > 0.0:
+                    qcd_mask = (labels == qcd_label)
+                    if qcd_mask.sum() > 10:
+                        proxy_md = _proxy_md(embeddings, labels, qcd_label)
+                        nw = torch.ones(qcd_mask.sum(), device=device)
+                        loss_disco = distance_corr(
+                            ae_reco_per_event[qcd_mask],
+                            proxy_md[qcd_mask],
+                            nw,
+                        )
+                        loss = loss + disco_weight * loss_disco
+
         if use_amp:
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -127,23 +180,27 @@ def train_epoch(
         else:
             loss.backward()
             optimizer.step()
-        
+
         if scheduler is not None:
             scheduler.step()
         if scheduled_contrst_wght:
             contrastive_weight.step()
 
         bs = x.size(0)
-        total_loss += loss.item() * bs
-        total_contrast  += loss_constrast.item() * bs
-        total_ce   += loss_ce.item() * bs
-        count      += bs
+        total_loss     += loss.item() * bs
+        total_contrast += loss_contrast.item() * bs
+        total_ce       += loss_ce.item() * bs
+        total_ae       += loss_ae.item() * bs
+        total_disco    += loss_disco.item() * bs
+        count          += bs
         class_metrics.update(logits, labels)
 
     return {
-        "loss": total_loss / count,
-        "contrast":  total_contrast  / count,
-        "ce":   total_ce   / count,
+        "loss":     total_loss     / count,
+        "contrast": total_contrast / count,
+        "ce":       total_ce       / count,
+        "ae_reco":  total_ae       / count,
+        "disco":    total_disco    / count,
         **class_metrics.compute_metrics()
     }
 
@@ -153,19 +210,30 @@ def validate_epoch(
     ce_loss_fn, contrastive_loss,
     val_loader, norm_constants, device,
     contrastive_weight=0.05,
-    pairwise=False, num_classes=4
+    pairwise=False, num_classes=4,
+    ae_model=None, ae_reco_weight=1.0,
 ):
     """
     Validation pass (no grads). Returns averaged metrics.
     """
     encoder.eval(); projector.eval(); classifier.eval()
+    if ae_model is not None:
+        ae_model.eval()
 
-    total_loss = total_contrast = total_ce = 0.0
-    correct = count = 0
+    total_loss = total_contrast = total_ce = total_ae = 0.0
+    count = 0
     scheduled_contrst_wght = not (isinstance(contrastive_weight, int) or isinstance(contrastive_weight, float))
     class_metrics = ClassificationMetrics(num_classes)
+    mse_no_reduce = torch.nn.MSELoss(reduction="none")
 
-    for x, mask, labels in val_loader:
+    for batch in val_loader:
+        if len(batch) == 4:
+            x, mask, labels, obj = batch
+            obj = obj.to(device)
+        else:
+            x, mask, labels = batch
+            obj = None
+
         x = x.to(device); mask = mask.to(device); labels = labels.to(device)
 
         mask = torch.cat([
@@ -178,24 +246,32 @@ def validate_epoch(
         latent = encoder(x, delta_r, mask)
         embeddings = F.normalize(projector(latent), dim=1)
 
-        loss_constrast = contrastive_loss(embeddings, labels)
-        logits   = classifier(embeddings)
-        loss_ce  = ce_loss_fn(logits, labels)
- 
+        loss_contrast = contrastive_loss(embeddings, labels)
+        logits  = classifier(embeddings)
+        loss_ce = ce_loss_fn(logits, labels)
+
         contrast_weight_value = contrastive_weight.get() if scheduled_contrst_wght else contrastive_weight
-        loss = contrast_weight_value * loss_constrast + (1 - contrast_weight_value) * loss_ce
+        loss = contrast_weight_value * loss_contrast + (1 - contrast_weight_value) * loss_ce
+
+        loss_ae = torch.tensor(0.0, device=device)
+        if ae_model is not None and obj is not None:
+            recon, _ = ae_model(obj)
+            loss_ae = mse_no_reduce(recon, obj).mean(dim=1).mean()
+            loss = loss + ae_reco_weight * loss_ae
 
         bs = x.size(0)
-        total_loss += loss.item() * bs
-        total_contrast  += loss_constrast.item() * bs
-        total_ce   += loss_ce.item() * bs
-        count      += bs
+        total_loss     += loss.item() * bs
+        total_contrast += loss_contrast.item() * bs
+        total_ce       += loss_ce.item() * bs
+        total_ae       += loss_ae.item() * bs
+        count          += bs
         class_metrics.update(logits, labels)
 
     return {
-        "loss": total_loss / count,
-        "contrast":  total_contrast  / count,
-        "ce":   total_ce   / count,
+        "loss":    total_loss     / count,
+        "contrast": total_contrast / count,
+        "ce":      total_ce       / count,
+        "ae_reco": total_ae       / count,
         **class_metrics.compute_metrics()
     }
 
