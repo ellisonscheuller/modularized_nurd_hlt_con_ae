@@ -233,7 +233,7 @@ def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
 
 def ABCD(config):
     print("Logging in to wandb...", flush=True)
-    wandb.login(key="REDACTED")
+    wandb.login()
     wandb.init(project="AE vs. Contrastive ABCD",
                settings=wandb.Settings(_disable_stats=True),
                config=config)

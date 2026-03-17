@@ -16,7 +16,7 @@ cd /afs/cern.ch/user/e/escheull/nobackup/modularized_nurd_hlt_con_ae
 
 $PYTHON -m pip install -e . --quiet
 
-export WANDB_API_KEY=REDACTED
+export WANDB_API_KEY=$(cat ~/.wandb_api_key)
 
 # find the latest checkpoint in ssl_checkpoints
 LATEST_CKPT=$(ls -t /eos/user/e/escheull/ssl_checkpoints/embedding_hlt_linformer_supcon_encoder_*.pth | head -1)

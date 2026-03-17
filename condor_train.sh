@@ -28,7 +28,7 @@ if [ ! -L checkpoints ]; then
     ln -s "$EOS_CHECKPOINTS" checkpoints
 fi
 
-export WANDB_API_KEY=REDACTED
+export WANDB_API_KEY=$(cat ~/.wandb_api_key)
 
 $PYTHON train.py \
     --train_cfg configs/train_sup_con.yaml \
